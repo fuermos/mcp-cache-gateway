@@ -96,6 +96,16 @@ class BackendsRegistry(
     private var cached: List<BackendConfig> = emptyList()
 
     /**
+     * Test-only constructor — pre-populates cache, skips DB.
+     * Use for unit tests that don't need real DB.
+     */
+    constructor(preloadedBackends: List<BackendConfig>) : this(
+        primaryJdbc = JdbcTemplate()
+    ) {
+        this.cached = preloadedBackends
+    }
+
+    /**
      * Load all enabled backends. Tries primary, falls back to backup on failure.
      */
     fun loadBackends(): List<BackendConfig> {

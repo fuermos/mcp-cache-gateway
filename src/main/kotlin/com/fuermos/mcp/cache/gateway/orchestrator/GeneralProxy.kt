@@ -5,134 +5,192 @@ import com.fuermos.mcp.cache.gateway.cache.CacheWrite
 import com.fuermos.mcp.cache.gateway.config.BackendConfig
 import com.fuermos.mcp.cache.gateway.config.BackendsRegistry
 import com.fuermos.mcp.cache.gateway.server.ServerLifecycleManager
+import com.fuermos.mcp.cache.gateway.transport.JsonRpcError
 import com.fuermos.mcp.cache.gateway.transport.JsonRpcRequest
 import com.fuermos.mcp.cache.gateway.transport.JsonRpcResponse
+import com.fuermos.mcp.cache.gateway.transport.McpStdioClient
 import com.fuermos.mcp.cache.gateway.utils.Hashing
-import kotlinx.serialization.json.JsonElement
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.put
 import org.slf4j.LoggerFactory
+import java.util.concurrent.atomic.AtomicLong
 
 /**
- * GeneralProxy — Y 架构 orchestrator (Phase 2.4).
+ * GeneralProxy — Y 架构 orchestrator (Phase 2.5.2).
  *
- * Aggregates tools from all enabled backends + routes tools/call by
- * `backend.name + tool.name`. Caches results in two-tier cache.
+ * Real subprocess integration:
+ *   - aggregateTools() spawns each enabled backend + calls tools/list via McpStdioClient
+ *   - routeCall() parses 'backend.tool' format, spawns backend, forwards tools/call
+ *   - Cache lookup pipeline reused (Day 2.2 CacheLookup)
+ *   - ServerLifecycleManager reused (Day 1.2 — subprocess spawn + lifecycle)
  *
- * Phase 2.4 design (per spec §4 Phase 2 2.4):
- *   - tools/list: aggregate all enabled backends' tools
- *   - tools/call: route by `backend.name + tool.name`
- *   - cache lookup pipeline (Redis → PG fallback)
- *   - subprocess spawn via ServerLifecycleManager (Day 1.2)
- *
- * Pattern references:
- *   - 借鉴 design.md §3.1 (架构 — Spring Boot manages backend lifecycle)
- *   - 借鉴 examples/servers.yaml (server registry, deprecated file)
- *   - 借鉴 mcp_backend_env (DB-driven env vars + secret_ref)
- *   - 借鉴 McpMethodRouter (JSON-RPC method dispatch)
+ * Design (per 主人 17:31 acceptance + 智多星 spec §4 2.5.2):
+ *   - Tool name format: '{backend.name}.{tool.name}' (e.g. 'wrongnotebook.list_notebooks')
+ *   - Real subprocess spawn — NO hardcoded tools
+ *   - One backend fail doesn't break aggregateTools (graceful degradation)
+ *   - Tool listing cache (30s) to avoid re-spawn per request
  */
 class GeneralProxy(
     private val backendsRegistry: BackendsRegistry,
     private val lookup: CacheLookup,
     private val write: CacheWrite,
-    private val serverManager: ServerLifecycleManager
+    private val serverManager: ServerLifecycleManager,
+    private val toolListCacheTtlMs: Long = 30_000L
 ) {
 
     private val log = LoggerFactory.getLogger(GeneralProxy::class.java)
 
+    private val aggregateCalls = AtomicLong(0)
+    private val routeCalls = AtomicLong(0)
+    private val toolListCache = mutableMapOf<String, ToolListCacheEntry>()
+    private val toolListCacheTtlNanos = toolListCacheTtlMs * 1_000_000L
+
+    private data class ToolListCacheEntry(
+        val tools: List<AggregateTool>,
+        val refreshedAtNanos: Long
+    )
+
     /**
      * Aggregate tools from all enabled backends.
      *
-     * Each backend contributes its tools to the aggregate list. Tools are
-     * tagged with `backend.name` so tools/call can route correctly.
+     * Spawns each backend subprocess + calls tools/list via McpStdioClient.
+     * Aggregates results. Graceful degradation: one backend fail → others still work.
      */
-    fun aggregateTools(): List<AggregateTool> {
+    suspend fun aggregateTools(): List<AggregateTool> = coroutineScope {
         val backends = backendsRegistry.cachedBackends()
-        val tools = mutableListOf<AggregateTool>()
-        for (backend in backends) {
-            // Phase 2 simplification: bridge contributes 5 tools (per wrongnotebook)
-            // In production, this would query each backend's tools/list (via spawn)
-            // For Phase 2 in-process bridge pattern, we hardcode wrongnotebook 5 tools
-            val backendTools = knownToolsFor(backend)
-            tools.addAll(backendTools)
-        }
-        return tools
+        aggregateCalls.incrementAndGet()
+        log.info("aggregating tools from {} enabled backend(s)", backends.size)
+
+        backends.map { backend ->
+            async(Dispatchers.IO) {
+                try {
+                    aggregateFromBackend(backend)
+                } catch (e: Exception) {
+                    log.error("backend '{}' tools/list failed: {}", backend.name, e.message)
+                    emptyList()
+                }
+            }
+        }.awaitAll().flatten()
     }
 
     /**
-     * Route a tools/call request to the appropriate backend.
-     *
-     * @return JsonRpcResponse from the backend (or cached entry on hit)
+     * Get tools from a single backend (with 30s cache).
+     */
+    private suspend fun aggregateFromBackend(backend: BackendConfig): List<AggregateTool> {
+        val now = System.nanoTime()
+        val cached = toolListCache[backend.name]
+        if (cached != null && (now - cached.refreshedAtNanos) < toolListCacheTtlNanos) {
+            log.debug("tool list cache HIT for backend '{}'", backend.name)
+            return cached.tools
+        }
+
+        val handle = serverManager.acquire(backend.name)
+        val client = McpStdioClient.wrap(backend, handle)
+        try {
+            val rawTools = client.listTools()
+            val tools = rawTools.mapNotNull { toolJson ->
+                val name = (toolJson["name"] as? JsonPrimitive)?.contentOrNull
+                    ?: return@mapNotNull null
+                val description = (toolJson["description"] as? JsonPrimitive)?.contentOrNull ?: ""
+                AggregateTool(
+                    name = "${backend.name}.$name",
+                    backend = backend.name,
+                    description = description
+                )
+            }
+            toolListCache[backend.name] = ToolListCacheEntry(tools, now)
+            log.info("backend '{}' tools/list: {} tools", backend.name, tools.size)
+            return tools
+        } finally {
+            // McpStdioClient (wrap mode) doesn't own process
+        }
+    }
+
+    /**
+     * Route a tools/call to the appropriate backend.
      */
     suspend fun routeCall(request: JsonRpcRequest): JsonRpcResponse {
-        val toolName = extractToolName(request)
-            ?: return JsonRpcResponse.failure(request.id, JsonRpcError(
-                code = JsonRpcResponse.ERR_INVALID_PARAMS,
-                message = "tools/call request missing 'name' parameter"
-            ))
+        routeCalls.incrementAndGet()
 
-        // Parse "backend.tool" format (e.g. "wrongnotebook.list_notebooks")
+        val toolName = extractToolName(request)
+            ?: return JsonRpcResponse.failure(
+                request.id,
+                JsonRpcError(
+                    code = JsonRpcResponse.ERR_INVALID_PARAMS,
+                    message = "tools/call missing 'name' parameter"
+                )
+            )
+
         val parts = toolName.split(".", limit = 2)
         if (parts.size != 2) {
-            return JsonRpcResponse.failure(request.id, JsonRpcError(
-                code = JsonRpcResponse.ERR_INVALID_PARAMS,
-                message = "tool name must be in 'backend.tool' format: $toolName"
-            ))
+            return JsonRpcResponse.failure(
+                request.id,
+                JsonRpcError(
+                    code = JsonRpcResponse.ERR_INVALID_PARAMS,
+                    message = "tool name must be in 'backend.tool' format: $toolName"
+                )
+            )
         }
         val backendName = parts[0]
         val actualToolName = parts[1]
 
-        val backend = backendsRegistry.cachedBackends().firstOrNull { it.name == backendName }
-            ?: return JsonRpcResponse.failure(request.id, JsonRpcError(
-                code = JsonRpcResponse.ERR_METHOD_NOT_FOUND,
-                message = "Unknown backend: $backendName (enabled: ${backendsRegistry.cachedBackends().map { it.name }})"
-            ))
-
-        // Cache lookup (request_id → params_hash)
-        val paramsHash = computeParamsHash(request)
+        // Cache lookup by request_id (idempotency)
         val cached = lookup.lookupByRequestId(request.id)
         if (cached != null && !cached.isExpired(System.currentTimeMillis())) {
             log.debug("cache HIT (request_id={})", request.id)
-            return JsonRpcResponse.success(request.id, cached.resultJson ?: kotlinx.serialization.json.JsonNull)
-        }
-
-        // Cache miss → forward to backend (subprocess via ServerLifecycleManager)
-        val handle = serverManager.acquire(backendName)
-        val result = handle.execute(request)
-        // Write back (sync Redis + async PG) if successful
-        if (result.isSuccess) {
-            write.writeCacheEntry(request.id, backendName, request.method, toolName, paramsHash, request.params ?: JsonObject(emptyMap()), result.result)
-        }
-        return result
-    }
-
-    /**
-     * Known tools for a backend (Phase 2.4 simplification).
-     *
-     * Real implementation would spawn backend subprocess + call tools/list.
-     * For wrongnotebook in-process bridge, we hardcode the 5 Phase 1 tools.
-     */
-    private fun knownToolsFor(backend: BackendConfig): List<AggregateTool> {
-        // TODO Day 2.5: when bridging to subprocess, call backend.tools/list
-        // For now, return Phase 1 wrongnotebook 5 tools if backend.name == 'wrongnotebook'
-        return when (backend.name) {
-            "wrongnotebook" -> listOf(
-                AggregateTool(name = "wrongnotebook.list_notebooks", backend = backend.name, description = "List all notebooks (R, cacheable=true, TTL=60s)"),
-                AggregateTool(name = "wrongnotebook.get_notebook", backend = backend.name, description = "Fetch a single notebook by id (R, cacheable=true, TTL=60s)"),
-                AggregateTool(name = "wrongnotebook.add_question", backend = backend.name, description = "Add question to notebook (W, cacheable=false)"),
-                AggregateTool(name = "wrongnotebook.update_question", backend = backend.name, description = "Update existing question (W, cacheable=false)"),
-                AggregateTool(name = "wrongnotebook.delete_question", backend = backend.name, description = "Delete question by id (W, cacheable=false)")
+            return JsonRpcResponse.success(
+                request.id,
+                cached.resultJson ?: kotlinx.serialization.json.JsonNull
             )
-            else -> emptyList()  // No known tools for unbridged backends
+        }
+
+        // Cache miss → spawn backend + forward
+        val backend = backendsRegistry.cachedBackends().firstOrNull { it.name == backendName }
+            ?: return JsonRpcResponse.failure(
+                request.id,
+                JsonRpcError(
+                    code = JsonRpcResponse.ERR_METHOD_NOT_FOUND,
+                    message = "Unknown backend: $backendName"
+                )
+            )
+
+        val handle = serverManager.acquire(backendName)
+        try {
+            val arguments = (request.params as? JsonObject)?.get("arguments") as? JsonObject
+                ?: JsonObject(emptyMap())
+            val forwardedRequest = JsonRpcRequest(
+                id = request.id,
+                method = "tools/call",
+                params = JsonObject(mapOf(
+                    "name" to JsonPrimitive(actualToolName),
+                    "arguments" to arguments
+                ))
+            )
+            val response = handle.execute(forwardedRequest)
+
+            if (response.isSuccess) {
+                val paramsHash = Hashing.sha256(arguments)
+                write.writeCacheEntry(
+                    requestId = request.id,
+                    serverId = backendName,
+                    method = request.method,
+                    toolName = toolName,
+                    paramsHash = paramsHash,
+                    paramsJson = arguments,
+                    resultJson = response.result
+                )
+            }
+            return response
+        } finally {
+            // ServerLifecycleManager handles cleanup on idle timeout
         }
     }
 
-    /**
-     * Extract tool name from tools/call request params.
-     */
     private fun extractToolName(request: JsonRpcRequest): String? {
         val params = request.params as? JsonObject ?: return null
         val nameEl = params["name"] as? JsonPrimitive ?: return null
@@ -140,12 +198,19 @@ class GeneralProxy(
     }
 
     /**
-     * Compute stable params hash (same as GatewayOrchestrator).
+     * Snapshot for observability.
      */
-    private fun computeParamsHash(request: JsonRpcRequest): String {
-        val params = request.params ?: JsonObject(emptyMap())
-        return Hashing.sha256(params)
-    }
+    fun snapshot(): ProxyStats = ProxyStats(
+        aggregateCalls = aggregateCalls.get(),
+        routeCalls = routeCalls.get(),
+        toolListCacheSize = toolListCache.size
+    )
+
+    data class ProxyStats(
+        val aggregateCalls: Long,
+        val routeCalls: Long,
+        val toolListCacheSize: Int
+    )
 }
 
 /**
@@ -156,11 +221,3 @@ data class AggregateTool(
     val backend: String,
     val description: String
 )
-
-/**
- * Alias for JsonRpcError (avoid import cycle).
- */
-typealias JsonRpcError = com.fuermos.mcp.cache.gateway.transport.JsonRpcError
-
-// Import for buildJsonObject used in routeCall (avoid IDE red)
-private val unused = buildJsonObject { put("k", "v") }
