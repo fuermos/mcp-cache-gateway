@@ -1,0 +1,83 @@
+# mcp-cache-gateway per-tool configuration
+# 借鉴 design doc §3.5 + tubi-mcp wrongnotebook 工具列表
+#
+# Each tool can override:
+#   - version: tool version (auto-invalidate cache when changed)
+#   - ttlMs: how long to cache (per-tool override of global default)
+#   - timeSensitive: short TTL + no SWR for time-critical data
+#   - cacheable: false for write operations
+#   - swrGraceMs: SWR grace period (null = auto = ttlMs * 0.5)
+#   - maxParamSize: don't cache params larger than this
+#   - notes: free-form
+
+tools:
+
+  # ============ wrongnotebook bridge (Phase 1: 5 tools) ============
+
+  - name: get_notebook
+    version: "1.0.0"
+    ttlMs: 3600000          # 1 hour
+    cacheable: true
+    timeSensitive: false
+    notes: |
+      读单个错题本。owner 视角稳定，TTL 1h 足够。
+      借鉴 tubi-mcp wrongnotebook-mcp-bridge.js get_notebook 实现。
+
+  - name: list_notebooks
+    version: "1.0.0"
+    ttlMs: 1800000          # 30 min
+    cacheable: true
+    timeSensitive: false
+    notes: |
+      列错题本。中频读，TTL 30min。
+      借鉴 tubi-mcp wrongnotebook-mcp-bridge.js list_notebooks。
+
+  - name: add_question
+    version: "1.0.0"
+    ttlMs: 0                # 不缓存（写操作）
+    cacheable: false
+    notes: |
+      写操作 — 不缓存。Phase 1 实现但 cacheable=false。
+
+  - name: update_question
+    version: "1.0.0"
+    ttlMs: 0                # 不缓存（写操作）
+    cacheable: false
+    notes: |
+      写操作 — 不缓存。Phase 1 实现但 cacheable=false。
+
+  - name: delete_question
+    version: "1.0.0"
+    ttlMs: 0                # 不缓存（写操作）
+    cacheable: false
+    notes: |
+      写操作 — 不缓存。Phase 1 实现但 cacheable=false。
+
+  # ============ Phase 2+ 待迁移 tools (示例, 暂不启用) ============
+
+  # - name: get_question
+  #   ttlMs: 3600000
+  #   cacheable: true
+  # - name: search_questions
+  #   ttlMs: 1800000
+  #   cacheable: true
+  # - name: practice_record
+  #   ttlMs: 0
+  #   cacheable: false  # 写操作
+  # - name: update_mastery
+  #   ttlMs: 0
+  #   cacheable: false  # 写操作
+  # - name: create_notebook
+  #   ttlMs: 0
+  #   cacheable: false  # 写操作
+  # - name: delete_notebook
+  #   ttlMs: 0
+  #   cacheable: false  # 写操作
+
+# Global defaults (per-tool override if specified)
+defaults:
+  ttlMs: 86400000          # 1 day
+  cacheable: true
+  timeSensitive: false
+  swrGraceMs: null         # null = auto = ttlMs * 0.5
+  maxParamSize: 10240      # 10KB

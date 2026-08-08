@@ -1,0 +1,85 @@
+spring:
+  application:
+    name: mcp-cache-gateway
+  profiles:
+    active: dev
+  main:
+    # Phase 1 stdio-only — disable Spring WebFlux HTTP listener.
+    # tubi-mcp occupies :3850 (PID 3968789); use :3852 for Phase 2 Streamable HTTP.
+    web-application-type: none
+
+  # Redis Tier 1 cache
+  data:
+    redis:
+      host: 127.0.0.1
+      port: 6379
+      timeout: 1000ms
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 2
+
+  # PostgreSQL Tier 2 cache (long-term)
+  datasource:
+    url: jdbc:postgresql://localhost:5432/mcp_cache
+    username: ${POSTGRES_USER:mcp_cache}
+    password: ${POSTGRES_PASSWORD:}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 5000
+
+  # Flyway migrations
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+server:
+  port: 3852  # Phase 1 stdio — unused. Phase 2 Streamable HTTP will enable webflux here.
+  # MCP 暂用 stdio transport (Phase 1), HTTP Phase 2
+  # netty:
+  #   worker:
+  #     threads: 4
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    tags:
+      application: mcp-cache-gateway
+
+# Custom gateway config
+gateway:
+  tool-config-path: ${TOOL_CONFIG_PATH:./examples/tools.yaml}
+  server-registry-path: ${SERVER_REGISTRY_PATH:./examples/servers.yaml}
+  # Wrong-Notebook upstream (Phase 1 bridge target)
+  # All credentials are loaded from env vars, never committed to git.
+  # See .env.example for placeholder documentation.
+  wrongnotebook:
+    url: ${WRONGNOTEBOOK_URL:http://localhost:3032}
+    user: ${WRONGNOTEBOOK_USER:}
+    password: ${WRONGNOTEBOOK_PASSWORD:}
+    credentials-file: ${WRONGNOTEBOOK_CREDENTIALS_FILE:<OPENCLAW_STATE_DIR>/wrong-notebook-credentials.json}
+    token-file: ${WRONGNOTEBOOK_TOKEN_FILE:<OPENCLAW_STATE_DIR>/wrong-notebook-token.json}
+  cache:
+    default-ttl-ms: 86400000  # 1 day
+    default-swr-grace-ms: 3600000  # 1 hour
+    negative-cache-5xx-ttl-ms: 300000  # 5 min
+    negative-cache-timeout-ttl-ms: 60000  # 1 min
+  lazy-server:
+    idle-timeout-ms: 60000  # 60s
+    spawn-timeout-ms: 5000  # 5s
+
+logging:
+  level:
+    root: INFO
+    com.fuermos.mcp: DEBUG
+    org.springframework.web.reactive: INFO

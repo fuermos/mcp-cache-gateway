@@ -1,0 +1,38 @@
+{
+  "_comment": "OpenClaw MCP integration example for mcp-cache-gateway",
+  "_doc": "Replace tubi-mcp in OpenClaw ~/.openclaw/config.yaml mcp.servers section",
+
+  "mcp": {
+    "servers": {
+      "mcp-cache-gateway": {
+        "command": "java",
+        "args": [
+          "-jar",
+          "<MCP_CACHE_GATEWAY_HOME>/build/libs/mcp-cache-gateway-0.1.0.jar"
+        ],
+        "env": {
+          "REDIS_HOST": "127.0.0.1",
+          "REDIS_PORT": "6379",
+          "POSTGRES_URL": "jdbc:postgresql://localhost:5432/mcp_cache",
+          "POSTGRES_USER": "mcp_cache",
+          "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD}",
+          "WRONGNOTEBOOK_URL": "http://localhost:3032",
+          "WRONGNOTEBOOK_USER": "${WRONGNOTEBOOK_USER}",
+          "WRONGNOTEBOOK_PASSWORD": "${WRONGNOTEBOOK_PASSWORD}",
+          "TOOL_CONFIG_PATH": "<MCP_CACHE_GATEWAY_HOME>/examples/tools.yaml",
+          "SERVER_REGISTRY_PATH": "<MCP_CACHE_GATEWAY_HOME>/examples/servers.yaml"
+        },
+        "cwd": "<MCP_CACHE_GATEWAY_HOME>",
+        "supportsParallelToolCalls": true,
+        "_replaces": "tubi-mcp wrongnotebook bridge (Phase 1: 5 tools)"
+      }
+    }
+  },
+
+  "_migration_notes": [
+    "Phase 1: 启动 mcp-cache-gateway 作为新 MCP endpoint",
+    "Phase 1: tubi-mcp 仍保留作 fallback (主服务的 wrongnotebook bridge 仍在 tubi-mcp)",
+    "Phase 2+: 把更多 tubi-mcp bridge 迁过来，每个一独立 verify",
+    "Phase 5+: tubi-mcp 标 archived, OpenClaw config 只指向 mcp-cache-gateway"
+  ]
+}

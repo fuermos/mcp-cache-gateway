@@ -1,0 +1,59 @@
+# mcp-cache-gateway server registry
+# 配置 lazy spawn 的 MCP servers（Phase 1: wrongnotebook）
+#
+# 借鉴 tubi-mcp wrongnotebook-mcp-bridge.js + wigolo-bridge.js 模式
+#
+# Each server can have:
+#   - id: unique server identifier (used as cache key namespace)
+#   - command: executable (e.g. "node", "java", "python3")
+#   - args: command line arguments
+#   - env: environment variables
+#   - cwd: working directory
+#   - eager: true = spawn at gateway startup (default false = lazy)
+#   - maxRestarts: how many times to restart on crash (default 5)
+#   - restartDelayMs: delay between restart attempts (default 1000)
+
+servers:
+
+  # ============ Phase 1: wrongnotebook bridge (自管) ============
+  # Phase 1 中 wrongnotebook 是 mcp-cache-gateway 内部实现，不需要 spawn
+  # 这是 Phase 2+ 准备的 server registry schema
+
+  # - id: wrongnotebook
+  #   command: java
+  #   args: ["-jar", "/path/to/wrongnotebook-bridge.jar"]
+  #   env:
+  #     WRONGNOTEBOOK_URL: "http://localhost:3032"
+  #     WRONGNOTEBOOK_USER: "${WRONGNOTEBOOK_USER}"
+  #     WRONGNOTEBOOK_PASSWORD: "${WRONGNOTEBOOK_PASSWORD}"
+  #   cwd: <YOUR_PROJECT_DIR>
+  #   eager: false  # lazy spawn on first wrongnotebook tool call
+  #   maxRestarts: 5
+  #   restartDelayMs: 1000
+
+  # ============ Phase 2+: 准备迁移的 bridge ============
+
+  # - id: wigolo
+  #   command: npx
+  #   args: ["-y", "wigolo"]
+  #   env: {}
+  #   cwd: <YOUR_PROJECT_DIR>
+  #   eager: false
+  #
+  # - id: exameow
+  #   command: java
+  #   args: ["-jar", "/path/to/exameow-bridge.jar"]
+  #   env:
+  #     EXAMEOW_URL: "http://127.0.0.1:8080"
+  #   eager: false
+  #
+  # - id: pdf-router
+  #   command: python3
+  #   args: ["<TUBI_MCP_HOME>/pdf-router-mineru.py"]
+  #   eager: false
+
+# Global defaults
+defaults:
+  eager: false
+  maxRestarts: 5
+  restartDelayMs: 1000

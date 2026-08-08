@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+.pnp/
+.pnp.js
+
+# Build output
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# Gradle
+.gradle/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Cache
+.cache/
+.npm/
+.eslintcache
+
+# Coverage
+coverage/
+*.lcov
+
+# Local config (per-developer overrides)
+config.local.json
+# Local test scripts (use ~/.openclaw/state/ for credentials — never commit)
+scripts/e2e_test.py
+scripts/*_local.py
+scripts/*_dev.py
