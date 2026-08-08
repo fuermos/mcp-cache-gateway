@@ -7,6 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import org.slf4j.LoggerFactory
 import java.time.Duration
 
@@ -61,6 +62,41 @@ class CacheWrite(
             }
         }
         return redisOk
+    }
+
+    /**
+     * Convenience: build + write a cache entry from raw fields (Phase 2.4 GeneralProxy helper).
+     */
+    fun writeCacheEntry(
+        requestId: String,
+        serverId: String,
+        method: String,
+        toolName: String?,
+        paramsHash: String,
+        paramsJson: JsonElement,
+        resultJson: JsonElement?,
+        ttlMs: Int = 60_000,
+        nowProvider: () -> Long = { System.currentTimeMillis() }
+    ): Boolean {
+        val now = nowProvider()
+        val (freshUntil, _) = CacheEntry.computeWindows(now, ttlMs, null)
+        val entry = CacheEntry(
+            requestId = requestId,
+            serverId = serverId,
+            method = method,
+            toolName = toolName,
+            toolVersion = null,
+            paramsHash = paramsHash,
+            paramsJson = paramsJson,
+            resultJson = resultJson,
+            resultSize = resultJson?.toString()?.length ?: 0,
+            cacheTier = CacheTier.REDIS,
+            ttlMs = ttlMs,
+            createdAtMs = now,
+            freshUntilMs = freshUntil,
+            staleUntilMs = null
+        )
+        return write(entry)
     }
 
     /**
