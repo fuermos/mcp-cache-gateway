@@ -1,6 +1,7 @@
 package com.fuermos.mcp.cache.gateway.config
 
 import org.slf4j.LoggerFactory
+import org.springframework.jdbc.core.JdbcTemplate
 
 /**
  * ToolConfigResolver — runtime accessor for per-tool TTL config.
@@ -34,10 +35,88 @@ class ToolConfigResolver(
         /** Build a default empty resolver (no tools, all defaults). */
         fun empty(loader: ToolConfigLoader = ToolConfigLoader()): ToolConfigResolver =
             ToolConfigResolver(ToolConfigRoot(), loader)
+
+        /**
+         * Build a resolver from mcp_tool_config table (DB-driven, Phase 2.2).
+         *
+         * Reads tool configs + defaults from DB. Used by Phase 2 to eliminate
+         * the examples/tools.yaml file (per 主人 17:46 拍板: 完全 DB-driven).
+         *
+         * Expects table schema (from V1__initial_schema.sql):
+         *   mcp_tool_config (
+         *     tool_name TEXT PRIMARY KEY,
+         *     tool_version TEXT,
+         *     ttl_ms INTEGER DEFAULT 86400000,
+         *     time_sensitive BOOLEAN DEFAULT FALSE,
+         *     cacheable BOOLEAN DEFAULT TRUE,
+         *     swr_grace_ms INTEGER,
+         *     max_param_size INTEGER,
+         *     notes TEXT,
+         *     updated_at TIMESTAMPTZ DEFAULT NOW()
+         *   )
+         */
+        fun fromDatabase(jdbc: JdbcTemplate): ToolConfigResolver {
+            val root = loadFromDatabase(jdbc)
+            return ToolConfigResolver(root)
+        }
+
+        /**
+         * Load ToolConfigRoot directly from DB (used by fromDatabase + reload).
+         *
+         * Defaults come from a special row where tool_name='__defaults__' (or
+         * fall back to ToolConfigDefaults() if not present).
+         */
+        fun loadFromDatabase(jdbc: JdbcTemplate): ToolConfigRoot {
+            val rows = jdbc.queryForList(QUERY_TOOLS)
+            val tools = mutableListOf<ToolConfig>()
+            var defaults = ToolConfigDefaults()
+
+            for (row in rows) {
+                val toolName = row["tool_name"] as String
+                if (toolName == "__defaults__") {
+                    defaults = ToolConfigDefaults(
+                        ttlMs = (row["ttl_ms"] as? Number)?.toInt() ?: defaults.ttlMs,
+                        cacheable = row["cacheable"] as? Boolean ?: defaults.cacheable,
+                        timeSensitive = row["time_sensitive"] as? Boolean ?: defaults.timeSensitive,
+                        swrGraceMs = (row["swr_grace_ms"] as? Number)?.toLong(),
+                        maxParamSize = (row["max_param_size"] as? Number)?.toInt() ?: defaults.maxParamSize
+                    )
+                } else {
+                    tools.add(
+                        ToolConfig(
+                            name = toolName,
+                            version = row["tool_version"] as? String,
+                            ttlMs = (row["ttl_ms"] as? Number)?.toInt() ?: defaults.ttlMs,
+                            cacheable = row["cacheable"] as? Boolean ?: defaults.cacheable,
+                            timeSensitive = row["time_sensitive"] as? Boolean ?: defaults.timeSensitive,
+                            swrGraceMs = (row["swr_grace_ms"] as? Number)?.toLong() ?: defaults.swrGraceMs,
+                            maxParamSize = (row["max_param_size"] as? Number)?.toInt() ?: defaults.maxParamSize,
+                            notes = row["notes"] as? String
+                        )
+                    )
+                }
+            }
+            return ToolConfigRoot(tools = tools, defaults = defaults)
+        }
+
+        private const val QUERY_TOOLS = """
+            SELECT tool_name, tool_version, ttl_ms, time_sensitive, cacheable,
+                   swr_grace_ms, max_param_size, notes
+            FROM mcp_tool_config
+            ORDER BY tool_name
+        """
     }
 
     /** Default constructor — empty config, default loader. */
     constructor() : this(ToolConfigRoot(), ToolConfigLoader())
+
+    /**
+     * Reload from DB (called by McpBackendWatcher on NOTIFY).
+     */
+    fun reloadFromDatabase(jdbc: JdbcTemplate) {
+        val newRoot = loadFromDatabase(jdbc)
+        replaceWith(newRoot)
+    }
 
     /**
      * Resolve effective config for a tool name (per-tool + defaults merge).
