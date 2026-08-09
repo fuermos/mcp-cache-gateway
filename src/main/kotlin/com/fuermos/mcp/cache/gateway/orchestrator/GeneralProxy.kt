@@ -213,7 +213,16 @@ class GeneralProxy(
             // "Unknown tool" — clients should retry with the tool name format reported
             // by tools/list.
             val cachedEntry = toolListCache[backendName]
-            val baseNameToForward = if (cachedEntry?.forwardPrefixed == true) toolName else actualToolName
+            // If the cache knows this backend is "already prefixed" (e.g. tubi-mcp/wrongnotebook-mcp-bridge),
+            // and the request came in WITHOUT the backend prefix (Risk 2 single-backend heuristic),
+            // we must add the prefix before forwarding — the bridge expects "wrongnotebook.list_notebooks",
+            // not bare "list_notebooks".
+            val cachedPrefixed = cachedEntry?.forwardPrefixed == true
+            val baseNameToForward = when {
+                cachedPrefixed && parts.size == 1 -> "${backendName}.${actualToolName}"
+                cachedPrefixed && parts.size == 2 -> toolName
+                else -> actualToolName
+            }
             val forwardedRequest = JsonRpcRequest(
                 id = request.id,
                 method = "tools/call",
