@@ -117,6 +117,9 @@ class CacheIntegrationTest {
         redis.disconnect()
     }
 
+    private fun uniqueArgs(label: String): JsonObject =
+        buildJsonObject { put("__test_marker", "${label}-${System.nanoTime()}") }
+
     private fun buildRequest(toolName: String, args: JsonObject = buildJsonObject {}): JsonRpcRequest {
         return JsonRpcRequest(
             id = "req-${System.nanoTime()}",
@@ -137,15 +140,17 @@ class CacheIntegrationTest {
         val mockResult = buildJsonObject { put("notebooks", 5) }
         io.mockk.every { mockClient.listNotebooks() } returns mockResult
 
-        val req = buildRequest("wrongnotebook.list_notebooks")
+        val args = uniqueArgs("hit-by-params")
+        val req1 = buildRequest("wrongnotebook.list_notebooks", args)
         // First call: cache miss → bridge call
-        val r1 = orchestrator.handle(req)
+        val r1 = orchestrator.handle(req1)
         assertTrue(r1.isSuccess)
-        // Second call: cache hit → no bridge call (verify below)
-        val r2 = orchestrator.handle(req.copy(id = "req-other"))
+        // Second call: same params_hash (different request_id) → cache hit
+        val req2 = req1.copy(id = "req-other-${System.nanoTime()}")
+        val r2 = orchestrator.handle(req2)
         assertTrue(r2.isSuccess)
-        // Bridge called only once
-        io.mockk.verify(atLeast = 1) { mockClient.listNotebooks() }
+        // Bridge called only once (second was a hit)
+        io.mockk.verify(exactly = 1) { mockClient.listNotebooks() }
     }
 
     @Test
@@ -154,9 +159,11 @@ class CacheIntegrationTest {
         val mockResult = buildJsonObject { put("data", "test-value") }
         io.mockk.every { mockClient.listNotebooks() } returns mockResult
 
-        val req = buildRequest("wrongnotebook.list_notebooks")
-        val r1 = orchestrator.handle(req)
-        val r2 = orchestrator.handle(req.copy(id = "req-2"))
+        val args = uniqueArgs("hit-result")
+        val req1 = buildRequest("wrongnotebook.list_notebooks", args)
+        val r1 = orchestrator.handle(req1)
+        val req2 = req1.copy(id = "req-2-${System.nanoTime()}")
+        val r2 = orchestrator.handle(req2)
 
         assertEquals(r1.result, r2.result, "cache hit should return same result as miss")
     }
@@ -166,13 +173,15 @@ class CacheIntegrationTest {
         if (!redis.isConnected()) return@runBlocking
         io.mockk.every { mockClient.listNotebooks() } returns buildJsonObject {}
 
-        val req = buildRequest("wrongnotebook.list_notebooks")
-        orchestrator.handle(req)  // miss
+        val args = uniqueArgs("hit-no-bridge")
+        val req1 = buildRequest("wrongnotebook.list_notebooks", args)
+        orchestrator.handle(req1)  // miss
         // Reset mock to verify next call doesn't trigger it
         io.mockk.clearMocks(mockClient)
         io.mockk.every { mockClient.listNotebooks() } returns buildJsonObject {}
 
-        orchestrator.handle(req.copy(id = "req-2"))  // hit
+        val req2 = req1.copy(id = "req-2-${System.nanoTime()}")  // same args, new id
+        orchestrator.handle(req2)  // hit (params_hash match)
 
         io.mockk.verify(exactly = 0) { mockClient.listNotebooks() }
     }
@@ -185,13 +194,13 @@ class CacheIntegrationTest {
         val mockResult = buildJsonObject { put("notebook", "n1") }
         io.mockk.every { mockClient.listNotebooks() } returns mockResult
 
-        val req = buildRequest("wrongnotebook.list_notebooks")
+        val args = uniqueArgs("miss-write-back")
+        val req = buildRequest("wrongnotebook.list_notebooks", args)
         val response = orchestrator.handle(req)
 
         assertTrue(response.isSuccess)
         io.mockk.verify(atLeast = 1) { mockClient.listNotebooks() }
         // Verify write back to Redis via lookup
-        val paramsHash = Hashing.sha256(buildJsonObject {})  // empty args
         val cached = lookup.lookupByRequestId(req.id)
         assertNotNull(cached, "should have written back to cache")
     }
@@ -201,14 +210,16 @@ class CacheIntegrationTest {
         if (!redis.isConnected()) return@runBlocking
         io.mockk.every { mockClient.listNotebooks() } returns buildJsonObject {}
 
-        val req = buildRequest("wrongnotebook.list_notebooks")
-        orchestrator.handle(req)  // miss
+        val args = uniqueArgs("miss-then-hit")
+        val req1 = buildRequest("wrongnotebook.list_notebooks", args)
+        orchestrator.handle(req1)  // miss
         val stats1 = orchestrator.snapshotStats()
-        orchestrator.handle(req.copy(id = "req-2"))  // hit
+        val req2 = req1.copy(id = "req-2-${System.nanoTime()}")  // same args, new id
+        orchestrator.handle(req2)  // hit (params_hash match, no new miss)
         val stats2 = orchestrator.snapshotStats()
 
         assertEquals(1, stats2.freshHits - stats1.freshHits, "should have 1 more fresh hit")
-        assertEquals(1, stats2.misses - stats1.misses, "should have 1 more miss")
+        assertEquals(0, stats2.misses - stats1.misses, "hit path should not increment miss counter")
     }
 
     @Test

@@ -62,6 +62,14 @@ class ToolConfigResolverDbTest {
 
     @AfterEach
     fun tearDown() {
+        // Clean up test-introduced rows so subsequent runs start from seed-only state.
+        // Without this, `test.dynamic_tool` left over from a previous run would
+        // make `reloadFromDatabase picks up new entries` fail with `after > before`.
+        if (::jdbc.isInitialized) {
+            runCatching {
+                jdbc.update("DELETE FROM mcp_tool_config WHERE tool_name LIKE 'test.%'")
+            }
+        }
         pg.close()
     }
 
