@@ -16,6 +16,7 @@ java {
 }
 
 repositories {
+    mavenLocal()
     mavenCentral()
 }
 
@@ -26,6 +27,8 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-data-redis")
     implementation("org.springframework.boot:spring-boot-starter-jdbc")
     implementation("org.springframework.boot:spring-boot-starter-validation")
+    // Phase 3: actuator for /actuator/health (Day 2.6 SOP-2 used this for P0 verify)
+    implementation("org.springframework.boot:spring-boot-starter-actuator")
 
     // Database
     implementation("org.flywaydb:flyway-core")

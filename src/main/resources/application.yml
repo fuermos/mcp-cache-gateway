@@ -4,9 +4,10 @@ spring:
   profiles:
     active: dev
   main:
-    # Phase 1 stdio-only — disable Spring WebFlux HTTP listener.
-    # tubi-mcp occupies :3850 (PID 3968789); use :3852 for Phase 2 Streamable HTTP.
-    web-application-type: none
+    # Phase 3 Streamable HTTP — enable WebFlux HTTP listener on :3852.
+    # tubi-mcp occupies :3850 (PID 3968789); mcp-cache-gateway uses :3852.
+    # Phase 1 stdio-only was `web-application-type: none` (replaced 8/9 15:21 by Phase 3).
+    web-application-type: reactive
 
   # Redis Tier 1 cache
   data:
