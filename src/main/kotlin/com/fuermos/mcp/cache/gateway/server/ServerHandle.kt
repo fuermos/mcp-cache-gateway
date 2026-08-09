@@ -47,7 +47,11 @@ class ServerHandle(
 
     private val log = LoggerFactory.getLogger(ServerHandle::class.java)
 
-    private val json = Json { ignoreUnknownKeys = true }
+    // encodeDefaults = true so the `jsonrpc: "2.0"` field is always written to stdout.
+    // Without it, kotlinx.serialization drops default-valued fields and MCP peers
+    // (e.g. tubi-mcp/wrongnotebook-mcp-bridge) reject the request with
+    // "Invalid Request: jsonrpc must be \"2.0\"".
+    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val executeLock = java.util.concurrent.locks.ReentrantLock()
 
     /** Liveness flag — set to false when process dies or handle is closed. */

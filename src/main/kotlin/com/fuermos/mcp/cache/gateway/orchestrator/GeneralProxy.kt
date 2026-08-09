@@ -4,6 +4,7 @@ import com.fuermos.mcp.cache.gateway.cache.CacheLookup
 import com.fuermos.mcp.cache.gateway.cache.CacheWrite
 import com.fuermos.mcp.cache.gateway.config.BackendConfig
 import com.fuermos.mcp.cache.gateway.config.BackendsRegistry
+import com.fuermos.mcp.cache.gateway.server.ServerHandle
 import com.fuermos.mcp.cache.gateway.server.ServerLifecycleManager
 import com.fuermos.mcp.cache.gateway.transport.JsonRpcError
 import com.fuermos.mcp.cache.gateway.transport.JsonRpcRequest
@@ -14,6 +15,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
@@ -52,7 +55,12 @@ class GeneralProxy(
 
     private data class ToolListCacheEntry(
         val tools: List<AggregateTool>,
-        val refreshedAtNanos: Long
+        val refreshedAtNanos: Long,
+        // True iff this backend already returns tool names prefixed with its own backend id
+        // (e.g. tubi-mcp/wrongnotebook-mcp-bridge). When true, routeCall() forwards the full
+        // tool name (with prefix) to the subprocess; otherwise it strips the prefix per the
+        // Phase 2.5 contract (raw tool name expected by the subprocess).
+        val forwardPrefixed: Boolean = false
     )
 
     /**
@@ -94,16 +102,32 @@ class GeneralProxy(
         try {
             val rawTools = client.listTools()
             val tools = rawTools.mapNotNull { toolJson ->
-                val name = (toolJson["name"] as? JsonPrimitive)?.contentOrNull
+                val rawName = (toolJson["name"] as? JsonPrimitive)?.contentOrNull
                     ?: return@mapNotNull null
+                // Avoid double-prefixing: some backends (e.g. tubi-mcp/wrongnotebook-mcp-bridge)
+                // already return names prefixed with their backend id (e.g. "wrongnotebook.list_notebooks").
+                // In that case, use the raw name as-is. Otherwise prepend the backend name.
+                val name = if (rawName.startsWith("${backend.name}.")) rawName else "${backend.name}.$rawName"
                 val description = (toolJson["description"] as? JsonPrimitive)?.contentOrNull ?: ""
                 AggregateTool(
-                    name = "${backend.name}.$name",
+                    name = name,
                     backend = backend.name,
                     description = description
                 )
             }
-            toolListCache[backend.name] = ToolListCacheEntry(tools, now)
+            // Detect "already prefixed" backends (e.g. tubi-mcp/wrongnotebook-mcp-bridge) so that
+            // routeCall() forwards the full prefixed tool name to the subprocess. Otherwise
+            // (Phase 2.5 echo backends), routeCall strips the backend prefix per the original
+            // contract (subprocess receives the raw tool name like "echo_tool").
+            //
+            // Heuristic: if any tool name from the backend starts with "backendName." AND that
+            // prefix wasn't added by us this same call (the original raw name already had it),
+            // treat the backend as prefixed.
+            val forwardPrefixed = rawTools.any { raw ->
+                val rawName = (raw["name"] as? JsonPrimitive)?.contentOrNull ?: return@any false
+                rawName.startsWith("${backend.name}.")
+            }
+            toolListCache[backend.name] = ToolListCacheEntry(tools, now, forwardPrefixed = forwardPrefixed)
             log.info("backend '{}' tools/list: {} tools", backend.name, tools.size)
             return tools
         } finally {
@@ -176,11 +200,25 @@ class GeneralProxy(
         try {
             val arguments = (request.params as? JsonObject)?.get("arguments") as? JsonObject
                 ?: JsonObject(emptyMap())
+            // Two forwarding formats are supported:
+            //   - Phase 2.5 echo backends: receive the RAW tool name (e.g. "echo_tool")
+            //   - tubi-mcp/wrongnotebook-mcp-bridge (and similar): receive the FULL
+            //     prefixed name (e.g. "wrongnotebook.list_notebooks") because the backend
+            //     itself owns tool name namespacing.
+            //
+            // We detect the backend's format from the tools/list cache (populated by an
+            // earlier aggregateTools() call). Clients MUST call /mcp/tools/list at least
+            // once before /mcp/tools/call so the cache is populated; otherwise we fall
+            // back to the Phase 2.5 default (raw name) and bridged backends will return
+            // "Unknown tool" — clients should retry with the tool name format reported
+            // by tools/list.
+            val cachedEntry = toolListCache[backendName]
+            val baseNameToForward = if (cachedEntry?.forwardPrefixed == true) toolName else actualToolName
             val forwardedRequest = JsonRpcRequest(
                 id = request.id,
                 method = "tools/call",
                 params = JsonObject(mapOf(
-                    "name" to JsonPrimitive(actualToolName),
+                    "name" to JsonPrimitive(baseNameToForward),
                     "arguments" to arguments
                 ))
             )

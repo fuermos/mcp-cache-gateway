@@ -37,7 +37,11 @@ class McpStdioClient(
 
     private val log = LoggerFactory.getLogger(McpStdioClient::class.java)
 
-    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = false }
+    // encodeDefaults = true so `jsonrpc: "2.0"` is always serialized into requests.
+    // Without this, kotlinx.serialization drops default-valued fields (JsonRpcRequest.jsonrpc
+    // defaults to "2.0"), and MCP peers like tubi-mcp/wrongnotebook-mcp-bridge reject the
+    // request with "Invalid Request: jsonrpc must be \"2.0\"".
+    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     /**
      * Send a JSON-RPC request and wait for response result.

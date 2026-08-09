@@ -168,7 +168,14 @@ class BackendsRegistry(
 
         return rows.map { row ->
             val name = row["name"] as String
-            val argsJson = row["args"] as? String ?: "[]"
+            // args column is jsonb; PostgreSQL JDBC driver returns it as PGobject,
+            // not String. Cast through PGobject.value to recover the JSON literal.
+            // Falls back to direct String cast for clients that already unwrap it.
+            val argsJson: String = when (val raw = row["args"]) {
+                is String -> raw
+                is org.postgresql.util.PGobject -> raw.value ?: "[]"
+                else -> "[]"
+            }
             val envVars = envMap[name].orEmpty()
             BackendConfig(
                 name = name,
