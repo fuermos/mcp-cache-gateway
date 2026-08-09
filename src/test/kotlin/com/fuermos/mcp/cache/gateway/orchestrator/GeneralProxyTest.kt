@@ -114,7 +114,9 @@ class GeneralProxyTest {
     @Test
     fun `routeCall returns error for invalid format`() = runBlocking {
         if (!redis.isConnected()) return@runBlocking
-        val registry = makeRegistry(listOf(fakeBackend("registered")))
+        // Note: with single backend, raw tool name (no '.') is now accepted via fallback.
+        // To test strict -32602 format rejection, use zero backends (forces failure).
+        val registry = makeRegistry(emptyList())
         val proxy = GeneralProxy(registry, lookup, write, serverManager)
 
         val request = JsonRpcRequest(
@@ -775,6 +777,89 @@ class GeneralProxyTest {
         } finally {
             sm.shutdown()
         }
+    }
+
+    // ============ Risk 2 fix: backward compat for raw tool name (no backend prefix) ============
+
+    @Test
+    fun `routeCall with single backend accepts raw tool name without backend prefix`() = runBlocking {
+        if (!redis.isConnected()) return@runBlocking
+        // Script echoes back any tool name received (so we verify the proxy forwarded the raw name)
+        val script = """
+            read -r request_line
+            name=${'$'}(echo "${'$'}request_line" | grep -o '"name":"[^"]*"' | head -1 | sed 's/.*"name":"//;s/"//')
+            echo '{"id":"x","jsonrpc":"2.0","result":{"forwarded_name":"'"${'$'}name"'"}}'
+        """.trimIndent()
+        val backend = BackendConfig(
+            name = "raw-name-fb", displayName = "RawNameFB", enabled = true,
+            cmd = "/bin/sh", args = listOf("-c", script), cwd = null,
+            spawnTimeoutMs = 5_000, idleTimeoutMs = 60_000, maxRestarts = 1,
+            eager = false, protocol = "stdio", env = emptyMap(), version = 1
+        )
+        val sm = rebuildServerManagerWith(listOf("raw-name-fb" to script))
+        try {
+            val registry = makeRegistry(listOf(backend))
+            val proxy = GeneralProxy(registry, lookup, write, sm)
+
+            // Use raw tool name (no 'backend.' prefix) — should auto-resolve via single-backend fallback
+            val request = JsonRpcRequest(
+                id = "raw-name-1",
+                method = "tools/call",
+                params = buildJsonObject {
+                    put("name", "wrongnotebook_list_notebooks")  // raw name from DB tools table
+                    put("arguments", JsonObject(emptyMap()))
+                }
+            )
+            val response = proxy.routeCall(request)
+            assertTrue(response.isSuccess, "expected success, got error: ${response.error?.message}")
+            val result = response.result as JsonObject
+            // Verify subprocess received the raw tool name verbatim (no backend prefix to strip)
+            assertEquals("wrongnotebook_list_notebooks", (result["forwarded_name"] as kotlinx.serialization.json.JsonPrimitive).content,
+                "single-backend fallback should forward raw tool name verbatim")
+        } finally {
+            sm.shutdown()
+        }
+    }
+
+    @Test
+    fun `routeCall with multi-backend rejects raw tool name without prefix`() = runBlocking {
+        if (!redis.isConnected()) return@runBlocking
+        // Two backends registered — ambiguous, must use 'backend.tool' format
+        val registry = makeRegistry(listOf(fakeBackend("alpha"), fakeBackend("beta")))
+        val proxy = GeneralProxy(registry, lookup, write, serverManager)
+
+        val request = JsonRpcRequest(
+            id = "multi-raw-1",
+            method = "tools/call",
+            params = buildJsonObject {
+                put("name", "ambiguous_tool_name")  // no prefix, 2 backends
+                put("arguments", JsonObject(emptyMap()))
+            }
+        )
+        val response = proxy.routeCall(request)
+        assertTrue(response.isError, "expected error for ambiguous raw name with multi-backend")
+        assertEquals(-32602, response.error?.code)
+        assertTrue(response.error?.message?.contains("backend.tool") == true,
+            "error should mention 'backend.tool' format: ${response.error?.message}")
+    }
+
+    @Test
+    fun `routeCall with zero backends rejects raw tool name`() = runBlocking {
+        if (!redis.isConnected()) return@runBlocking
+        val registry = makeRegistry(emptyList())
+        val proxy = GeneralProxy(registry, lookup, write, serverManager)
+
+        val request = JsonRpcRequest(
+            id = "zero-raw-1",
+            method = "tools/call",
+            params = buildJsonObject {
+                put("name", "any_tool")
+                put("arguments", JsonObject(emptyMap()))
+            }
+        )
+        val response = proxy.routeCall(request)
+        assertTrue(response.isError)
+        assertEquals(-32602, response.error?.code)
     }
 
 }

@@ -127,17 +127,30 @@ class GeneralProxy(
             )
 
         val parts = toolName.split(".", limit = 2)
-        if (parts.size != 2) {
-            return JsonRpcResponse.failure(
-                request.id,
-                JsonRpcError(
-                    code = JsonRpcResponse.ERR_INVALID_PARAMS,
-                    message = "tool name must be in 'backend.tool' format: $toolName"
+        var backendName: String
+        var actualToolName: String
+        if (parts.size == 2) {
+            backendName = parts[0]
+            actualToolName = parts[1]
+        } else {
+            // Fallback: tool name without 'backend.' prefix (e.g. legacy clients or DB tools that
+            // stored raw names like 'wrongnotebook_list_notebooks' instead of 'wrongnotebook.list_notebooks').
+            // If exactly one backend is registered, treat the whole toolName as the tool name for that backend.
+            val backends = backendsRegistry.cachedBackends()
+            backendName = if (backends.size == 1) {
+                log.debug("tool name '{}' has no backend prefix; using only registered backend '{}'", toolName, backends[0].name)
+                backends[0].name
+            } else {
+                return JsonRpcResponse.failure(
+                    request.id,
+                    JsonRpcError(
+                        code = JsonRpcResponse.ERR_INVALID_PARAMS,
+                        message = "tool name must be in 'backend.tool' format (or no prefix when exactly one backend is registered): $toolName"
+                    )
                 )
-            )
+            }
+            actualToolName = toolName
         }
-        val backendName = parts[0]
-        val actualToolName = parts[1]
 
         // Cache lookup by request_id (idempotency)
         val cached = lookup.lookupByRequestId(request.id)
