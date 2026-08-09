@@ -59,7 +59,12 @@ class GatewayHttpConfig {
     ): RedisClient {
         val uri = "redis://$host:$port"
         log.info("Creating RedisClient (uri={})", uri)
-        return RedisClient(uri = uri)
+        // Eagerly establish the Lettuce connection at bean creation so CacheLookup /
+        // CacheWrite can call sync() immediately. Without this, RedisClient.sync()
+        // throws "RedisClient not connected — call connect() first" and every cache
+        // lookup silently falls back to DB (which is null in Phase 3 HTTP wiring),
+        // making cache HIT/MISS indistinguishable in production.
+        return RedisClient(uri = uri).also { it.connect() }
     }
 
     @Bean
